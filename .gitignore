@@ -1,0 +1,4 @@
+*.db
+*.dll
+/backup
+/lib

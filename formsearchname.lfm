@@ -1,0 +1,63 @@
+object FrmSearchName: TFrmSearchName
+  Left = 428
+  Height = 465
+  Top = 82
+  Width = 624
+  BorderStyle = bsDialog
+  Caption = 'Cari Nama Barang'
+  ClientHeight = 465
+  ClientWidth = 624
+  Color = clBlack
+  KeyPreview = True
+  Position = poScreenCenter
+  LCLVersion = '4.2.0.0'
+  OnKeyDown = FormKeyDown
+  OnShow = FormShow
+  object edtSearch: TEdit
+    Left = 0
+    Height = 30
+    Top = 10
+    Width = 626
+    CharCase = ecUppercase
+    Color = clHotLight
+    Font.CharSet = ANSI_CHARSET
+    Font.Color = clYellow
+    Font.Height = -19
+    Font.Name = 'Consolas'
+    Font.Pitch = fpFixed
+    Font.Quality = fqDraft
+    ParentFont = False
+    TabOrder = 0
+    OnKeyDown = edtSearchKeyDown
+  end
+  object sgList: TStringGrid
+    Left = 0
+    Height = 392
+    Top = 50
+    Width = 626
+    AutoEdit = False
+    AutoFillColumns = True
+    BorderStyle = bsNone
+    Color = clNavy
+    FixedColor = clMenuHighlight
+    Font.CharSet = ANSI_CHARSET
+    Font.Color = clWhite
+    Font.Height = -16
+    Font.Name = 'Consolas'
+    Font.Pitch = fpFixed
+    Font.Quality = fqDraft
+    GridLineColor = clBackground
+    Options = [goFixedVertLine, goFixedHorzLine, goVertLine, goHorzLine, goRowSelect, goSmoothScroll]
+    ParentFont = False
+    TabOrder = 1
+    OnDblClick = sgListDblClick
+    OnKeyDown = sgListKeyDown
+    ColWidths = (
+      64
+      141
+      141
+      140
+      140
+    )
+  end
+end

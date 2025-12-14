@@ -1,0 +1,379 @@
+object Form1: TForm1
+  Left = 290
+  Height = 768
+  Top = 62
+  Width = 1366
+  Align = alClient
+  BorderStyle = bsNone
+  Caption = 'POS System'
+  ClientHeight = 768
+  ClientWidth = 1366
+  Color = 2631720
+  Font.Color = clWhite
+  Font.Height = -13
+  Font.Name = 'Segoe UI'
+  Font.Quality = fqCleartype
+  KeyPreview = True
+  LCLVersion = '4.2.0.0'
+  WindowState = wsFullScreen
+  OnClose = FormClose
+  OnCreate = FormCreate
+  OnKeyDown = FormKeyDown
+  OnResize = FormResize
+  OnShow = FormShow
+  object pnlStatus: TPanel
+    Left = 0
+    Height = 40
+    Top = 0
+    Width = 1366
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 40
+    ClientWidth = 1366
+    Color = 3552822
+    ParentBackground = False
+    ParentColor = False
+    TabOrder = 0
+    object lblDriveStatus: TLabel
+      Left = 0
+      Height = 40
+      Top = 0
+      Width = 1366
+      Align = alClient
+      Caption = '  ⬤ OFFLINE - Drive Disconnected'
+      Color = clNone
+      Font.CharSet = ANSI_CHARSET
+      Font.Color = clWhite
+      Font.Height = -16
+      Font.Name = 'Segoe UI'
+      Font.Pitch = fpVariable
+      Font.Quality = fqDraft
+      Font.Style = [fsBold]
+      Layout = tlCenter
+      ParentColor = False
+      ParentFont = False
+    end
+    object lblAppTitle: TLabel
+      Left = 0
+      Height = 40
+      Top = 0
+      Width = 1366
+      Align = alClient
+      Alignment = taCenter
+      Caption = 'Toserba Jadi Baru'
+      Font.Color = clWhite
+      Font.Height = -16
+      Font.Name = 'Segoe UI'
+      Font.Style = [fsBold]
+      Layout = tlCenter
+      ParentFont = False
+    end
+    object lblDateTime: TLabel
+      Left = 0
+      Height = 40
+      Top = 0
+      Width = 1366
+      Align = alClient
+      Alignment = taRightJustify
+      Caption = '00:00:00  |  01/01/2025  '
+      Font.CharSet = ANSI_CHARSET
+      Font.Color = clWhite
+      Font.Height = -16
+      Font.Name = 'Segoe UI Semibold'
+      Font.Pitch = fpVariable
+      Font.Quality = fqDraft
+      Font.Style = [fsBold]
+      Layout = tlCenter
+      ParentFont = False
+    end
+  end
+  object pnlMain: TPanel
+    Left = 0
+    Height = 728
+    Top = 40
+    Width = 1366
+    Align = alClient
+    BevelOuter = bvNone
+    ClientHeight = 728
+    ClientWidth = 1366
+    Color = 2631720
+    ParentBackground = False
+    ParentColor = False
+    TabOrder = 1
+    object pnlLeft: TPanel
+      Left = 0
+      Height = 728
+      Top = 0
+      Width = 1016
+      Align = alClient
+      BevelOuter = bvNone
+      ClientHeight = 728
+      ClientWidth = 1016
+      Color = 2631720
+      ParentBackground = False
+      ParentColor = False
+      TabOrder = 0
+      object pnlSubtotal: TPanel
+        Left = 8
+        Height = 100
+        Top = 8
+        Width = 1000
+        Anchors = [akTop, akLeft, akRight]
+        BevelOuter = bvNone
+        BorderStyle = bsSingle
+        ClientHeight = 100
+        ClientWidth = 1000
+        Color = 3289650
+        ParentBackground = False
+        ParentColor = False
+        TabOrder = 0
+        object lSubTtl: TLabel
+          Left = 16
+          Height = 62
+          Top = 20
+          Width = 116
+          Caption = 'Rp 0'
+          Font.Color = clYellow
+          Font.Height = -53
+          Font.Name = 'Consolas'
+          Font.Style = [fsBold]
+          ParentFont = False
+        end
+        object lblSubtotalLabel: TLabel
+          Left = 16
+          Height = 17
+          Top = 4
+          Width = 64
+          Caption = 'SUBTOTAL'
+          Font.CharSet = ANSI_CHARSET
+          Font.Color = clSilver
+          Font.Height = -13
+          Font.Name = 'Segoe UI'
+          Font.Pitch = fpVariable
+          Font.Quality = fqDraft
+          Font.Style = [fsBold]
+          ParentFont = False
+        end
+      end
+      object DBGrid1: TDBGrid
+        Left = 8
+        Height = 440
+        Top = 116
+        Width = 1000
+        AlternateColor = 3289650
+        Anchors = [akTop, akLeft, akRight, akBottom]
+        AutoEdit = False
+        BorderStyle = bsNone
+        Color = 2631720
+        Columns = <        
+          item
+            Title.Caption = 'Code'
+            Width = 100
+            FieldName = 'product_code'
+          end        
+          item
+            Title.Caption = 'Nama Barang'
+            Width = 300
+            FieldName = 'product_name'
+          end        
+          item
+            Title.Alignment = taRightJustify
+            Title.Caption = 'Qty'
+            Width = 60
+            FieldName = 'qty'
+            DisplayFormat = '#,##0'
+          end        
+          item
+            Title.Alignment = taRightJustify
+            Title.Caption = 'Harga'
+            Width = 120
+            FieldName = 'price'
+            DisplayFormat = 'Rp #,##0'
+          end        
+          item
+            Title.Alignment = taRightJustify
+            Title.Caption = 'Disc'
+            Width = 80
+            FieldName = 'discount_value'
+            DisplayFormat = '#,##0'
+          end        
+          item
+            Title.Caption = 'Disc Type'
+            Width = 150
+            FieldName = 'discount_type'
+          end        
+          item
+            Title.Alignment = taRightJustify
+            Title.Caption = 'Total'
+            Width = 140
+            FieldName = 'total_price'
+            DisplayFormat = 'Rp #,##0'
+          end>
+        DataSource = DataSource1
+        DefaultRowHeight = 28
+        FixedColor = 4539717
+        FixedHotColor = clNone
+        Flat = True
+        Font.CharSet = ANSI_CHARSET
+        Font.Color = clWhite
+        Font.Height = -16
+        Font.Name = 'Consolas'
+        Font.Pitch = fpFixed
+        Font.Quality = fqDraft
+        ParentFont = False
+        ReadOnly = True
+        Scrollbars = ssNone
+        TabOrder = 1
+        TitleFont.CharSet = ANSI_CHARSET
+        TitleFont.Color = clWhite
+        TitleFont.Height = -13
+        TitleFont.Name = 'Segoe UI'
+        TitleFont.Pitch = fpFixed
+        TitleFont.Quality = fqDraft
+        TitleFont.Style = [fsBold]
+      end
+      object pnlInput: TPanel
+        Left = 8
+        Height = 156
+        Top = 564
+        Width = 1000
+        Anchors = [akLeft, akRight, akBottom]
+        BevelOuter = bvNone
+        ClientHeight = 156
+        ClientWidth = 1000
+        Color = 2631720
+        ParentBackground = False
+        ParentColor = False
+        TabOrder = 2
+        object lQtyInfo: TLabel
+          Left = 8
+          Height = 1
+          Top = 8
+          Width = 1
+          Font.Color = clLime
+          Font.Height = -19
+          Font.Name = 'Segoe UI'
+          Font.Style = [fsBold]
+          ParentFont = False
+        end
+        object edtMainInput: TEdit
+          Left = 8
+          Height = 62
+          Top = 58
+          Width = 984
+          Anchors = [akLeft, akRight, akBottom]
+          BorderStyle = bsNone
+          Color = 3289650
+          Font.Color = clWhite
+          Font.Height = -53
+          Font.Name = 'Consolas'
+          Font.Style = [fsBold]
+          NumbersOnly = True
+          ParentFont = False
+          TabOrder = 0
+          TextHint = '[ESC] Untuk Focus'
+          OnKeyDown = edtMainInputKeyDown
+          OnKeyPress = edtMainInputKeyPress
+        end
+        object lblInputLabel: TLabel
+          Left = 8
+          Height = 13
+          Top = 128
+          Width = 288
+          Caption = 'SCAN BARCODE / CODE / [END] untuk Qty / [SPACE] clear'
+          Font.Color = clSilver
+          Font.Height = -11
+          Font.Name = 'Segoe UI'
+          ParentFont = False
+        end
+      end
+    end
+    object pnlRight: TPanel
+      Left = 1016
+      Height = 728
+      Top = 0
+      Width = 350
+      Align = alRight
+      BevelOuter = bvNone
+      ClientHeight = 728
+      ClientWidth = 350
+      Color = 3289650
+      ParentBackground = False
+      ParentColor = False
+      TabOrder = 1
+      object GroupBox1: TGroupBox
+        Left = 8
+        Height = 712
+        Top = 8
+        Width = 334
+        Anchors = [akTop, akLeft, akRight, akBottom]
+        Caption = ' KEYBOARD SHORTCUTS '
+        ClientHeight = 690
+        ClientWidth = 330
+        Color = 3289650
+        Font.Color = clWhite
+        Font.Height = -13
+        Font.Name = 'Segoe UI'
+        Font.Quality = fqCleartype
+        ParentBackground = False
+        ParentColor = False
+        ParentFont = False
+        TabOrder = 0
+        object lblShortcuts: TLabel
+          Left = 16
+          Height = 600
+          Top = 24
+          Width = 298
+          Anchors = [akTop, akLeft, akRight]
+          AutoSize = False
+          Caption = 'F2  - Cari Nama Produk'#13#10#13#10'F6  - Diskon % (isi nominal dulu)'#13#10'F7  - Diskon Rp (isi nominal dulu)'#13#10#13#10'F11 - Bayar Debit/Kartu'#13#10'F12 - Bayar Cash'#13#10#13#10'END - Set Quantity'#13#10#13#10'DEL - Hapus Semua Keranjang'
+          Font.Color = clSilver
+          Font.Height = -13
+          Font.Name = 'Consolas'
+          ParentFont = False
+          WordWrap = True
+        end
+      end
+    end
+  end
+  object SQLQuery1: TSQLQuery
+    FieldDefs = <>
+    Database = SQLite3Connection1
+    Transaction = SQLTransaction1
+    Params = <>
+    Macros = <>
+    Left = 1288
+    Top = 64
+  end
+  object DataSource1: TDataSource
+    DataSet = SQLQuery1
+    Left = 1240
+    Top = 64
+  end
+  object SQLite3Connection1: TSQLite3Connection
+    Connected = False
+    LoginPrompt = False
+    KeepConnection = False
+    Transaction = SQLTransaction1
+    AlwaysUseBigint = False
+    Left = 1288
+    Top = 120
+  end
+  object SQLTransaction1: TSQLTransaction
+    Active = False
+    Database = SQLite3Connection1
+    Left = 1240
+    Top = 120
+  end
+  object TimerDriveCheck: TTimer
+    Interval = 5000
+    OnTimer = TimerDriveCheckTimer
+    Left = 1288
+    Top = 176
+  end
+  object TimerDateTime: TTimer
+    OnTimer = TimerDateTimeTimer
+    Left = 1240
+    Top = 176
+  end
+end

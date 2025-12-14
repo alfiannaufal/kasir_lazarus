@@ -1,0 +1,169 @@
+object FrmLogin: TFrmLogin
+  Left = 500
+  Height = 450
+  Top = 250
+  Width = 500
+  BorderStyle = bsDialog
+  Caption = 'LOGIN KASIR'
+  ClientHeight = 450
+  ClientWidth = 500
+  Color = 2631720
+  Font.Color = clWhite
+  Font.Height = -13
+  Font.Name = 'Segoe UI'
+  KeyPreview = True
+  Position = poScreenCenter
+  OnCreate = FormCreate
+  OnKeyDown = FormKeyDown
+  OnShow = FormShow
+  object pnlTop: TPanel
+    Left = 0
+    Height = 100
+    Top = 0
+    Width = 500
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 100
+    ClientWidth = 500
+    Color = 3289650
+    ParentBackground = False
+    ParentColor = False
+    TabOrder = 0
+    object lblTitle: TLabel
+      Left = 0
+      Height = 37
+      Top = 30
+      Width = 500
+      Align = alTop
+      Alignment = taCenter
+      BorderSpacing.Top = 30
+      Caption = 'LOGIN KASIR'
+      Font.Color = clYellow
+      Font.Height = -27
+      Font.Name = 'Segoe UI'
+      Font.Style = [fsBold]
+      ParentFont = False
+    end
+  end
+  object pnlMain: TPanel
+    Left = 0
+    Height = 290
+    Top = 100
+    Width = 500
+    Align = alClient
+    BevelOuter = bvNone
+    ClientHeight = 290
+    ClientWidth = 500
+    Color = 2631720
+    ParentBackground = False
+    ParentColor = False
+    TabOrder = 1
+    object lblKodeKasir: TLabel
+      Left = 50
+      Height = 17
+      Top = 40
+      Width = 64
+      Caption = 'Kode Kasir'
+      Font.Color = clWhite
+      Font.Height = -13
+      Font.Name = 'Segoe UI'
+      ParentFont = False
+    end
+    object edtKodeKasir: TEdit
+      Left = 50
+      Height = 37
+      Top = 65
+      Width = 400
+      Anchors = [akTop, akLeft, akRight]
+      BorderStyle = bsNone
+      Color = 3289650
+      Font.Color = clWhite
+      Font.Height = -32
+      Font.Name = 'Consolas'
+      Font.Style = [fsBold]
+      MaxLength = 6
+      NumbersOnly = True
+      ParentFont = False
+      TabOrder = 0
+      TextHint = '- - - - - -'
+      OnKeyDown = edtKodeKasirKeyDown
+      OnKeyPress = edtKodeKasirKeyPress
+    end
+    object lblPassword: TLabel
+      Left = 50
+      Height = 17
+      Top = 140
+      Width = 56
+      Caption = 'Password'
+      Font.Color = clWhite
+      Font.Height = -13
+      Font.Name = 'Segoe UI'
+      ParentFont = False
+    end
+    object edtPassword: TEdit
+      Left = 50
+      Height = 37
+      Top = 165
+      Width = 400
+      Anchors = [akTop, akLeft, akRight]
+      BorderStyle = bsNone
+      Color = 3289650
+      EchoMode = emPassword
+      Font.Color = clWhite
+      Font.Height = -32
+      Font.Name = 'Consolas'
+      Font.Style = [fsBold]
+      MaxLength = 6
+      NumbersOnly = True
+      ParentFont = False
+      PasswordChar = '*'
+      TabOrder = 1
+      TextHint = '* * * * * *'
+      OnKeyDown = edtPasswordKeyDown
+      OnKeyPress = edtPasswordKeyPress
+    end
+    object lblInfo: TLabel
+      Left = 50
+      Height = 17
+      Top = 235
+      Width = 400
+      Alignment = taCenter
+      Anchors = [akTop, akLeft, akRight]
+      Caption = ' '
+      Font.Color = clRed
+      Font.Height = -13
+      Font.Name = 'Segoe UI'
+      Font.Style = [fsBold]
+      ParentFont = False
+    end
+  end
+  object pnlBottom: TPanel
+    Left = 0
+    Height = 60
+    Top = 390
+    Width = 500
+    Align = alBottom
+    BevelOuter = bvNone
+    ClientHeight = 60
+    ClientWidth = 500
+    Color = 3289650
+    ParentBackground = False
+    ParentColor = False
+    TabOrder = 2
+    object lblHelp: TLabel
+      Left = 0
+      Height = 60
+      Top = 0
+      Width = 500
+      Align = alClient
+      Alignment = taCenter
+      Caption = '[ENTER] Login  |  [↑↓] Pindah  |  [ESC] Keluar'
+      Font.Color = clLime
+      Font.Height = -13
+      Font.Name = 'Consolas'
+      Font.Style = [fsBold]
+      Layout = tlCenter
+      ParentFont = False
+    end
+  end
+end

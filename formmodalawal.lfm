@@ -1,0 +1,161 @@
+object FrmModalAwal: TFrmModalAwal
+  Left = 500
+  Height = 400
+  Top = 250
+  Width = 600
+  BorderStyle = bsDialog
+  Caption = 'MODAL AWAL KASIR'
+  ClientHeight = 400
+  ClientWidth = 600
+  Color = 2631720
+  Font.Color = clWhite
+  Font.Height = -13
+  Font.Name = 'Segoe UI'
+  KeyPreview = True
+  Position = poScreenCenter
+  OnCreate = FormCreate
+  OnKeyDown = FormKeyDown
+  OnShow = FormShow
+  object pnlTop: TPanel
+    Left = 0
+    Height = 120
+    Top = 0
+    Width = 600
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 120
+    ClientWidth = 600
+    Color = 3289650
+    ParentBackground = False
+    ParentColor = False
+    TabOrder = 0
+    object lblTitle: TLabel
+      Left = 0
+      Height = 28
+      Top = 20
+      Width = 600
+      Align = alTop
+      Alignment = taCenter
+      BorderSpacing.Top = 20
+      Caption = 'MODAL AWAL KASIR'
+      Font.Color = clYellow
+      Font.Height = -21
+      Font.Name = 'Segoe UI'
+      Font.Style = [fsBold]
+      ParentFont = False
+    end
+    object lblDate: TLabel
+      Left = 0
+      Height = 17
+      Top = 58
+      Width = 600
+      Align = alTop
+      Alignment = taCenter
+      BorderSpacing.Top = 10
+      Caption = 'Senin, 09 Desember 2024'
+      Font.Color = clWhite
+      Font.Height = -13
+      Font.Name = 'Segoe UI'
+      ParentFont = False
+    end
+    object lblLastOpening: TLabel
+      Left = 0
+      Height = 17
+      Top = 85
+      Width = 600
+      Align = alTop
+      Alignment = taCenter
+      BorderSpacing.Top = 10
+      Caption = 'Modal kemarin: Rp 500,000'
+      Font.Color = clLime
+      Font.Height = -13
+      Font.Name = 'Segoe UI'
+      ParentFont = False
+    end
+  end
+  object pnlMain: TPanel
+    Left = 0
+    Height = 220
+    Top = 120
+    Width = 600
+    Align = alClient
+    BevelOuter = bvNone
+    ClientHeight = 220
+    ClientWidth = 600
+    Color = 2631720
+    ParentBackground = False
+    ParentColor = False
+    TabOrder = 1
+    object lblInstruction: TLabel
+      Left = 50
+      Height = 17
+      Top = 40
+      Width = 178
+      Caption = 'Masukkan modal awal hari ini:'
+      Font.Color = clWhite
+      Font.Height = -13
+      Font.Name = 'Segoe UI'
+      ParentFont = False
+    end
+    object lblAmount: TLabel
+      Left = 50
+      Height = 26
+      Top = 70
+      Width = 38
+      Caption = 'Rp'
+      Font.Color = clWhite
+      Font.Height = -19
+      Font.Name = 'Segoe UI'
+      Font.Style = [fsBold]
+      ParentFont = False
+    end
+    object edtModalAwal: TEdit
+      Left = 100
+      Height = 62
+      Top = 60
+      Width = 450
+      Anchors = [akTop, akLeft, akRight]
+      BorderStyle = bsNone
+      Color = 3289650
+      Font.Color = clWhite
+      Font.Height = -53
+      Font.Name = 'Consolas'
+      Font.Style = [fsBold]
+      NumbersOnly = True
+      ParentFont = False
+      TabOrder = 0
+      TextHint = '0'
+      OnKeyDown = edtModalAwalKeyDown
+      OnKeyPress = edtModalAwalKeyPress
+    end
+  end
+  object pnlBottom: TPanel
+    Left = 0
+    Height = 60
+    Top = 340
+    Width = 600
+    Align = alBottom
+    BevelOuter = bvNone
+    ClientHeight = 60
+    ClientWidth = 600
+    Color = 3289650
+    ParentBackground = False
+    ParentColor = False
+    TabOrder = 2
+    object lblHelp: TLabel
+      Left = 0
+      Height = 60
+      Top = 0
+      Width = 600
+      Align = alClient
+      Alignment = taCenter
+      Caption = '[ENTER] Simpan dan Mulai  |  [ESC] Keluar'
+      Font.Color = clLime
+      Font.Height = -13
+      Font.Name = 'Consolas'
+      Font.Style = [fsBold]
+      Layout = tlCenter
+      ParentFont = False
+    end
+  end
+end
