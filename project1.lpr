@@ -11,7 +11,7 @@ uses
   {$ENDIF}
   Interfaces, // this includes the LCL widgetset
   Forms, Unit1, FormDebit, FormSearchName, uTypes, FormReturn, FormModalAwal,
-  FormLogin;
+  FormLogin, uPostgreSQL, uPGConfig, uSyncWorker, uSyncQueue;
 
 {$R *.res}
 

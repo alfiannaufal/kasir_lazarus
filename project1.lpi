@@ -93,6 +93,26 @@
         <ResourceBaseClass Value="Form"/>
         <UnitName Value="FormLogin"/>
       </Unit>
+      <Unit>
+        <Filename Value="upostgresql.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="uPostgreSQL"/>
+      </Unit>
+      <Unit>
+        <Filename Value="usyncqueue.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="uSyncQueue"/>
+      </Unit>
+      <Unit>
+        <Filename Value="upgconfig.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="uPGConfig"/>
+      </Unit>
+      <Unit>
+        <Filename Value="usyncworker.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="uSyncWorker"/>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

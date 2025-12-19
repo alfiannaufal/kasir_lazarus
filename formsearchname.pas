@@ -5,7 +5,7 @@ unit FormSearchName;
 interface
 
 uses
-  Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls,
+  Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls, SQLDB, DB,
   Process, fpjson, jsonparser, LCLType, Grids, uTypes;
 
 type
@@ -26,15 +26,28 @@ type
     FIsSearching: Boolean;
     FBasePath: string;
 
+    // SQLite support
+    FConnection: TSQLConnection;
+    FTransaction: TSQLTransaction;
+
     procedure PerformSearch;
     procedure SelectCurrentItem;
     procedure ClearResults;
     procedure ShowLoading;
+
+    // SQLite search (PRIORITY)
+    function SearchFromSQLite(const Keyword: string): TJSONArray;
+
+    // DBF search (FALLBACK)
     function RunSeekName(const Keyword: string): TJSONArray;
     function CleanJSONString(const S: string): string;
     function SanitizeText(const S: string): string;
   public
     SelectedProduct: TProductInfo;
+
+    // Properties untuk SQLite connection
+    property Connection: TSQLConnection read FConnection write FConnection;
+    property Transaction: TSQLTransaction read FTransaction write FTransaction;
   end;
 
 var
@@ -56,19 +69,16 @@ begin
   for I := 1 to Length(S) do
   begin
     C := S[I];
-    // Hanya terima karakter yang printable dan aman
     if (Ord(C) >= 32) and (Ord(C) < 127) then
       Result := Result + C
-    else if C = #9 then  // Tab
+    else if C = #9 then
       Result := Result + ' '
-    else if C = #10 then // LF
+    else if C = #10 then
       Result := Result + ' '
-    else if C = #13 then // CR
-      Result := Result + ' '
-    // Karakter lain diabaikan
+    else if C = #13 then
+      Result := Result + ' ';
   end;
 
-  // Trim multiple spaces
   while Pos('  ', Result) > 0 do
     Result := StringReplace(Result, '  ', ' ', [rfReplaceAll]);
 
@@ -92,10 +102,8 @@ begin
   begin
     C := S[I];
 
-    // Track jika sedang di dalam string
     if C = '"' then
     begin
-      // Cek apakah quote ini escaped
       if (I > 1) and (S[I-1] = '\') then
         Result := Result + C
       else
@@ -107,7 +115,6 @@ begin
       Continue;
     end;
 
-    // Handle escape sequences di dalam string
     if InString and (C = '\') then
     begin
       if I < Length(S) then
@@ -115,42 +122,41 @@ begin
         NextC := S[I+1];
         case NextC of
           'n': begin
-            Result := Result + ' ';  // Replace \n dengan space
+            Result := Result + ' ';
             Inc(I, 2);
             Continue;
           end;
           'r': begin
-            Result := Result + ' ';  // Replace \r dengan space
+            Result := Result + ' ';
             Inc(I, 2);
             Continue;
           end;
           't': begin
-            Result := Result + ' ';  // Replace \t dengan space
+            Result := Result + ' ';
             Inc(I, 2);
             Continue;
           end;
           '\': begin
-            Result := Result + '\\';  // Keep valid escape
+            Result := Result + '\\';
             Inc(I, 2);
             Continue;
           end;
           '"': begin
-            Result := Result + '\"';  // Keep valid escape
+            Result := Result + '\"';
             Inc(I, 2);
             Continue;
           end;
           '/': begin
-            Result := Result + '\/';  // Keep valid escape
+            Result := Result + '\/';
             Inc(I, 2);
             Continue;
           end;
           'b', 'f': begin
-            Result := Result + ' ';  // Replace \b \f dengan space
+            Result := Result + ' ';
             Inc(I, 2);
             Continue;
           end;
           'u': begin
-            // Unicode escape - keep as is jika valid
             if (I + 5 <= Length(S)) then
             begin
               Result := Result + '\u' + Copy(S, I+2, 4);
@@ -159,7 +165,6 @@ begin
             end;
           end;
           else begin
-            // Invalid escape sequence - skip backslash
             Inc(I);
             Continue;
           end;
@@ -167,19 +172,15 @@ begin
       end;
     end;
 
-    // Karakter biasa
     if InString then
     begin
-      // Di dalam string - hanya terima printable chars
       if (Ord(C) >= 32) and (Ord(C) < 127) then
         Result := Result + C
       else if C = #9 then
-        Result := Result + ' '
-      // Karakter control lain diabaikan
+        Result := Result + ' ';
     end
     else
     begin
-      // Di luar string - JSON structure
       Result := Result + C;
     end;
 
@@ -188,7 +189,77 @@ begin
 end;
 
 { --------------------------------------------------------------- }
-{ UTILITY FUNCTION }
+{ SEARCH FROM SQLITE (PRIORITY) }
+{ --------------------------------------------------------------- }
+function TFrmSearchName.SearchFromSQLite(const Keyword: string): TJSONArray;
+var
+  TempQuery: TSQLQuery;
+  ProductObj: TJSONObject;
+begin
+  Result := nil;
+
+  if not Assigned(FConnection) or not Assigned(FTransaction) then
+    Exit;
+
+  if Trim(Keyword) = '' then
+    Exit;
+
+  try
+    TempQuery := TSQLQuery.Create(nil);
+    try
+      TempQuery.Database := FConnection;
+      TempQuery.Transaction := FTransaction;
+
+      // Search produk di SQLite
+      TempQuery.SQL.Text :=
+        'SELECT product_code, product_name, price, ' +
+        '       price_a, qty_a, price_b, qty_b, boom, qtymeth ' +
+        'FROM products ' +
+        'WHERE product_name LIKE :keyword AND is_active = 1 ' +
+        'ORDER BY product_name ' +
+        'LIMIT 100';
+      TempQuery.ParamByName('keyword').AsString := '%' + Keyword + '%';
+      TempQuery.Open;
+
+      if not TempQuery.EOF then
+      begin
+        Result := TJSONArray.Create;
+
+        while not TempQuery.EOF do
+        begin
+          ProductObj := TJSONObject.Create;
+          ProductObj.Add('code', TempQuery.FieldByName('product_code').AsString);
+          ProductObj.Add('desc', TempQuery.FieldByName('product_name').AsString);
+          ProductObj.Add('price', TempQuery.FieldByName('price').AsFloat);
+          ProductObj.Add('boom', TempQuery.FieldByName('boom').AsInteger = 1);
+          ProductObj.Add('qtymeth', TempQuery.FieldByName('qtymeth').AsInteger = 1);
+          ProductObj.Add('qty_a', TempQuery.FieldByName('qty_a').AsFloat);
+          ProductObj.Add('price_a', TempQuery.FieldByName('price_a').AsFloat);
+          ProductObj.Add('qty_b', TempQuery.FieldByName('qty_b').AsFloat);
+          ProductObj.Add('price_b', TempQuery.FieldByName('price_b').AsFloat);
+
+          Result.Add(ProductObj);
+          TempQuery.Next;
+        end;
+      end;
+
+      TempQuery.Close;
+    finally
+      TempQuery.Free;
+    end;
+
+  except
+    on E: Exception do
+    begin
+      if Assigned(Result) then
+        FreeAndNil(Result);
+      // Silent fail - akan fallback ke DBF
+    end;
+  end;
+end;
+
+{ --------------------------------------------------------------- }
+{ SEARCH FROM DBF (FALLBACK) }
 { --------------------------------------------------------------- }
 function TFrmSearchName.RunSeekName(const Keyword: string): TJSONArray;
 var
@@ -227,28 +298,22 @@ begin
     except
       on E: Exception do
       begin
-        // Error reading file
         Exit;
       end;
     end;
 
-    // Cek file kosong
     if Trim(SL.Text) = '' then Exit;
 
-    // Clean JSON string dari karakter aneh
     CleanedJSON := CleanJSONString(SL.Text);
 
     if Trim(CleanedJSON) = '' then Exit;
 
-    // Parse JSON dengan error handling
     JSON := nil;
     try
       JSON := GetJSON(CleanedJSON);
     except
       on E: Exception do
       begin
-        // JSON invalid - log error jika diperlukan
-        // ShowMessage('JSON Parse Error: ' + E.Message);
         Exit;
       end;
     end;
@@ -279,13 +344,12 @@ begin
   finally
     SL.Free;
 
-    // Cleanup JSON file
     if FileExists(JsonFile) then
     begin
       try
         DeleteFile(JsonFile);
       except
-        // Ignore delete errors
+        // Ignore
       end;
     end;
   end;
@@ -302,7 +366,6 @@ begin
 
   edtSearch.Clear;
 
-  // Setup grid
   sgList.ColCount := 3;
   sgList.RowCount := 1;
   sgList.FixedRows := 1;
@@ -340,7 +403,7 @@ begin
 end;
 
 { --------------------------------------------------------------- }
-{ SEARCH }
+{ SEARCH (SQLITE PRIORITY → DBF FALLBACK) }
 { --------------------------------------------------------------- }
 procedure TFrmSearchName.PerformSearch;
 var
@@ -349,6 +412,7 @@ var
   Obj: TJSONObject;
   NotFound: Boolean;
   ItemCode, ItemName: string;
+  UsedSQLite: Boolean;
 begin
   if FIsSearching then Exit;
 
@@ -362,6 +426,7 @@ begin
 
   FIsSearching := True;
   NotFound := False;
+  UsedSQLite := False;
 
   try
     ShowLoading;
@@ -371,7 +436,19 @@ begin
     if Assigned(FLastResult) then
       FreeAndNil(FLastResult);
 
-    FLastResult := RunSeekName(Keyword);
+    // ========== PRIORITAS 1: SEARCH DARI SQLITE ==========
+    FLastResult := SearchFromSQLite(Keyword);
+
+    if (FLastResult <> nil) and (FLastResult.Count > 0) then
+      UsedSQLite := True
+    else
+    begin
+      // ========== PRIORITAS 2: FALLBACK KE DBF ==========
+      if Assigned(FLastResult) then
+        FreeAndNil(FLastResult);
+
+      FLastResult := RunSeekName(Keyword);
+    end;
 
     if (FLastResult = nil) or (FLastResult.Count = 0) then
     begin
@@ -386,7 +463,6 @@ begin
       begin
         Obj := FLastResult.Objects[I];
 
-        // Sanitize text dari karakter aneh
         ItemCode := SanitizeText(Obj.Get('code', ''));
         ItemName := SanitizeText(Obj.Get('desc', ''));
 
@@ -448,6 +524,14 @@ begin
   SelectedProduct.Name  := SanitizeText(Obj.Get('desc', ''));
   SelectedProduct.Price := Obj.Get('price', 0.0);
 
+  // Data harga grosir
+  SelectedProduct.Boom := Obj.Get('boom', False);
+  SelectedProduct.QtyMeth := Obj.Get('qtymeth', False);
+  SelectedProduct.QtyA := Obj.Get('qty_a', 0.0);
+  SelectedProduct.PriceA := Obj.Get('price_a', 0.0);
+  SelectedProduct.QtyB := Obj.Get('qty_b', 0.0);
+  SelectedProduct.PriceB := Obj.Get('price_b', 0.0);
+
   ModalResult := mrOK;
 end;
 
@@ -458,7 +542,6 @@ procedure TFrmSearchName.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShi
 begin
   if Key = VK_ESCAPE then
   begin
-    // ESC pertama → clear search, ESC kedua → close
     if Trim(edtSearch.Text) <> '' then
     begin
       edtSearch.Clear;

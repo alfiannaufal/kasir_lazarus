@@ -8,7 +8,8 @@ uses
   Classes, SysUtils, Process, fpjson, jsonparser, SQLDB, SQLite3Conn, DB, Math,
   Forms, Controls, Graphics, Dialogs, StdCtrls, DBGrids, LCLType, ExtCtrls,
   IniFiles, StrUtils,
-  FormLogin, FormModalAwal, FormDebit, FormSearchName, FormReturn, uTypes;
+  FormLogin, FormModalAwal, FormDebit, FormSearchName, FormReturn, uTypes,
+  uPostgreSQL, uSyncQueue, uPGConfig, uSyncWorker;
 
 const
   // Terminal configuration
@@ -19,13 +20,14 @@ const
   KEY_SEARCH_NAME = VK_F2;
   KEY_DISC_PERCENT = VK_F6;
   KEY_DISC_NOMINAL = VK_F7;
+  KEY_RETURN = VK_F9;
+  KEY_EOD = VK_F10;
   KEY_PAY_DEBIT = VK_F11;
   KEY_PAY_CASH = VK_F12;
   KEY_CLEAR_INPUT = VK_SPACE;
   KEY_SET_QTY = VK_END;
   KEY_SCAN = VK_RETURN;
   KEY_FOCUS_INPUT = VK_ESCAPE;
-  KEY_RETURN = VK_F9;
 
   // Product code length ranges
   MIN_CODE_LENGTH = 5;
@@ -81,6 +83,12 @@ type
     FCurrentUser: TUserInfo;
     FLoginHistoryID: Integer;
 
+    // PostgreSQL & Sync managers
+    FPostgreSQLManager: TPostgreSQLManager;
+    FSyncQueueManager: TSyncQueueManager;
+    FSyncWorker: TSyncWorker;
+    FAppConfig: TAppConfig;
+
     procedure LoadTerminalConfig;
     procedure ValidateTerminalConfig;
 
@@ -123,6 +131,17 @@ type
     function GenerateReturnNo: string;
 
     function GetPriceByQty(const Info: TProductInfo; AQty: Double): Double;
+
+    procedure InitializePostgreSQL;
+    procedure SyncUsersFromPostgreSQL;
+    procedure TrySyncTransaction(const ATrxID: string; const ATrxData: TJSONObject);
+
+    procedure HandleEndOfDay;
+    procedure ProcessEndOfDay;
+    procedure SyncCashDrawerEOD;
+    procedure SyncProductsFromDBF;
+    function SyncAllPendingData: Integer;
+    function ReadDBFProducts(const DBFPath: string): Integer;
   public
   end;
 
@@ -135,6 +154,320 @@ var
 implementation
 
 {$R *.lfm}
+
+{ =============================================================================}
+{ POSTGRESQL INITIALIZATION                                               }
+{ =============================================================================}
+
+procedure TForm1.InitializePostgreSQL;
+begin
+  if not FAppConfig.PGConfig.Enabled then
+    Exit;
+
+  try
+    if FPostgreSQLManager.Connect(
+      FAppConfig.PGConfig.Host,
+      FAppConfig.PGConfig.Database,
+      FAppConfig.PGConfig.Username,
+      FAppConfig.PGConfig.Password,
+      FAppConfig.PGConfig.Port
+    ) then
+    begin
+      // Online - Register terminal
+      try
+        FPostgreSQLManager.RegisterTerminal(TERMINAL_NAME, TERMINAL_LOCATION);
+      except
+        // Silent
+      end;
+
+      // Start sync worker
+      try
+        FSyncWorker.Start;
+      except
+        // Silent
+      end;
+
+      UpdateStatusIndicator(FDriveOnline);
+    end
+    else
+    begin
+      // OFFLINE MODE - Tidak perlu error message
+      // Status indicator sudah show OFFLINE
+      UpdateStatusIndicator(FDriveOnline);
+    end;
+  except
+    on E: Exception do
+    begin
+      // Silent fail - status indicator akan show OFFLINE
+      UpdateStatusIndicator(FDriveOnline);
+    end;
+  end;
+end;
+
+procedure TForm1.TrySyncTransaction(const ATrxID: string; const ATrxData: TJSONObject);
+var
+  Success: Boolean;
+begin
+  Success := False;
+
+  // Try direct sync if online
+  if Assigned(FPostgreSQLManager) and FPostgreSQLManager.IsConnected then
+  begin
+    try
+      Success := FPostgreSQLManager.SyncTransaction(ATrxID, ATrxData);
+    except
+      Success := False;
+    end;
+  end;
+
+  // If failed, add to queue
+  if not Success and Assigned(FSyncQueueManager) then
+  begin
+    try
+      FSyncQueueManager.QueueTransaction(ATrxID, ATrxData);
+    except
+      // Silent fail
+    end;
+  end;
+end;
+
+{ --------------------------------------------------------------- }
+{ SYNC USERS FROM POSTGRESQL }
+{ --------------------------------------------------------------- }
+procedure TForm1.SyncUsersFromPostgreSQL;
+var
+  Users: TJSONArray;
+  UserObj: TJSONObject;
+  i: Integer;
+  UserLevel: string;
+  SyncCount: Integer;
+begin
+  Users := nil;
+
+  if not Assigned(FPostgreSQLManager) or not FPostgreSQLManager.IsConnected then
+    raise Exception.Create('Tidak terhubung ke PostgreSQL');
+
+  try
+    Users := FPostgreSQLManager.FetchAllUsers;
+
+    if Users.Count = 0 then
+      raise Exception.Create('Tidak ada user di PostgreSQL');
+
+    SQLQuery1.SQL.Text := 'DELETE FROM users WHERE is_default = 0';
+    SQLQuery1.ExecSQL;
+
+    SyncCount := 0;
+
+    for i := 0 to Users.Count - 1 do
+    begin
+      UserObj := Users.Objects[i];
+      UserLevel := UserObj.Get('user_level', 'kasir');
+
+      SQLQuery1.SQL.Text :=
+        'INSERT OR REPLACE INTO users (id, cashier_code, password, name, level, active, is_default, updated_at) ' +
+        'VALUES (:id, :code, :pass, :name, :level, 1, 0, :upd)';
+
+      SQLQuery1.ParamByName('id').AsInteger := UserObj.Get('user_id', 0);
+      SQLQuery1.ParamByName('code').AsString := UserObj.Get('username', '');
+      SQLQuery1.ParamByName('pass').AsString := '000000';
+      SQLQuery1.ParamByName('name').AsString := UserObj.Get('full_name', '');
+      SQLQuery1.ParamByName('level').AsString := UserLevel;
+      SQLQuery1.ParamByName('upd').AsString := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
+      SQLQuery1.ExecSQL;
+
+      Inc(SyncCount);
+    end;
+
+    if SQLTransaction1.Active then
+      SQLTransaction1.Commit;
+
+  except
+    on E: Exception do
+    begin
+      if SQLTransaction1.Active then
+        SQLTransaction1.Rollback;
+
+      if Assigned(Users) then
+        Users.Free;
+
+      raise; // Re-raise exception untuk ditangkap di DoLogin
+    end;
+  end;
+
+  if Assigned(Users) then
+    Users.Free;
+end;
+
+{ --------------------------------------------------------------- }
+{ SYNC PRODUCTS FROM DBF }
+{ --------------------------------------------------------------- }
+procedure TForm1.SyncProductsFromDBF;
+var
+  DBFPath: string;
+  SyncCount: Integer;
+begin
+  DBFPath := 'F:\wpi\dat\produk.dbf';
+
+  if not FileExists(DBFPath) then
+    raise Exception.Create('File produk.dbf tidak ditemukan: ' + DBFPath);
+
+  try
+    SyncCount := ReadDBFProducts(DBFPath);
+
+    if SyncCount = 0 then
+      raise Exception.Create('Tidak ada data produk yang berhasil disinkron');
+
+  except
+    on E: Exception do
+      raise; // Re-raise exception
+  end;
+end;
+
+function TForm1.ReadDBFProducts(const DBFPath: string): Integer;
+var
+  Proc: TProcess;
+  BasePath, JsonPath, ExecPath: string;
+  JSON: TJSONData;
+  Arr: TJSONArray;
+  Obj: TJSONObject;
+  S: string;
+  i: Integer;
+  ProdCode, AltCode, ProdName: string;  // ← Tambahkan AltCode
+  Price, PriceA, PriceB, QtyA, QtyB: Double;
+  Boom, QtyMeth: Integer;
+  SyncCount: Integer;
+begin
+  Result := 0;
+
+  if not FileExists(DBFPath) then
+  begin
+    ShowMessage('File DBF tidak ditemukan!' + sLineBreak +
+                'Path: ' + DBFPath);
+    Exit;
+  end;
+
+  try
+    BasePath := IncludeTrailingPathDelimiter(
+      ExtractFilePath(Application.ExeName) + 'hb30'
+    );
+
+    JsonPath := BasePath + 'products.json';
+    ExecPath := BasePath + 'syncprod.exe';
+
+    if FileExists(JsonPath) then
+      DeleteFile(JsonPath);
+
+    if FileExists(ExecPath) then
+    begin
+      Proc := TProcess.Create(nil);
+      try
+        Proc.Executable := ExecPath;
+        Proc.Parameters.Add(DBFPath);
+        Proc.Parameters.Add(JsonPath);
+        Proc.CurrentDirectory := BasePath;
+        Proc.Options := [poWaitOnExit, poNoConsole];
+        Proc.Execute;
+      finally
+        Proc.Free;
+      end;
+    end
+    else
+    begin
+      ShowMessage('syncprod.exe tidak ditemukan!' + sLineBreak +
+                  'Path: ' + ExecPath);
+      Exit;
+    end;
+
+    Sleep(500);
+
+    if not FileExists(JsonPath) then
+    begin
+      ShowMessage('Gagal membuat file JSON dari DBF!');
+      Exit;
+    end;
+
+    S := ReadFileToString(JsonPath);
+    if Trim(S) = '' then
+    begin
+      ShowMessage('File JSON kosong!');
+      Exit;
+    end;
+
+    JSON := nil;
+    SyncCount := 0;
+
+    try
+      JSON := GetJSON(S);
+
+      if JSON.JSONType = jtArray then
+      begin
+        Arr := TJSONArray(JSON);
+
+        SQLQuery1.SQL.Text := 'DELETE FROM products';
+        SQLQuery1.ExecSQL;
+
+        for i := 0 to Arr.Count - 1 do
+        begin
+          Obj := Arr.Objects[i];
+
+          ProdCode := Obj.Get('code', '');
+          AltCode := Obj.Get('altcode', '');  // ← Ambil altcode
+          ProdName := Obj.Get('name', '');
+          Price := Obj.Get('price', 0.0);
+          PriceA := Obj.Get('price_a', 0.0);
+          QtyA := Obj.Get('qty_a', 0.0);
+          PriceB := Obj.Get('price_b', 0.0);
+          QtyB := Obj.Get('qty_b', 0.0);
+          Boom := Obj.Get('boom', 0);
+          QtyMeth := Obj.Get('qtymeth', 0);
+
+          if Trim(ProdCode) = '' then
+            Continue;
+
+          SQLQuery1.SQL.Text :=
+            'INSERT OR REPLACE INTO products ' +
+            '(product_code, altcode, product_name, price, price_a, qty_a, price_b, qty_b, boom, qtymeth, is_active, updated_at) ' +
+            'VALUES (:code, :altcode, :name, :price, :pricea, :qtya, :priceb, :qtyb, :boom, :qtymeth, 1, :upd)';
+
+          SQLQuery1.ParamByName('code').AsString := ProdCode;
+          SQLQuery1.ParamByName('altcode').AsString := AltCode;  // ← Insert altcode
+          SQLQuery1.ParamByName('name').AsString := ProdName;
+          SQLQuery1.ParamByName('price').AsFloat := Price;
+          SQLQuery1.ParamByName('pricea').AsFloat := PriceA;
+          SQLQuery1.ParamByName('qtya').AsFloat := QtyA;
+          SQLQuery1.ParamByName('priceb').AsFloat := PriceB;
+          SQLQuery1.ParamByName('qtyb').AsFloat := QtyB;
+          SQLQuery1.ParamByName('boom').AsInteger := Boom;
+          SQLQuery1.ParamByName('qtymeth').AsInteger := QtyMeth;
+          SQLQuery1.ParamByName('upd').AsString := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
+          SQLQuery1.ExecSQL;
+
+          Inc(SyncCount);
+        end;
+
+        if SQLTransaction1.Active then
+          SQLTransaction1.Commit;
+
+        Result := SyncCount;
+      end;
+
+    finally
+      if Assigned(JSON) then
+        JSON.Free;
+      if FileExists(JsonPath) then
+        DeleteFile(JsonPath);
+    end;
+
+  except
+    on E: Exception do
+    begin
+      if SQLTransaction1.Active then
+        SQLTransaction1.Rollback;
+      ShowMessage('Error sync products: ' + E.Message);
+    end;
+  end;
+end;
+
 
 { --------------------------------------------------------------- }
 { DRIVE STATUS CHECK }
@@ -153,20 +486,32 @@ begin
 end;
 
 procedure TForm1.UpdateStatusIndicator(IsOnline: Boolean);
+var
+  StatusText: string;
 begin
   if IsOnline then
   begin
-    lblDriveStatus.Caption := '● ONLINE';
-    lblDriveStatus.Font.Color := clWhite;
-    pnlStatus.Color := $0050B000;  // Dark Green
+    if Assigned(FPostgreSQLManager) and FPostgreSQLManager.IsConnected then
+    begin
+      StatusText := '● ONLINE + SYNC';
+      lblDriveStatus.Font.Color := clWhite;
+      pnlStatus.Color := $0050B000;  // Dark Green
+    end
+    else
+    begin
+      StatusText := '● ONLINE (LOCAL)';
+      lblDriveStatus.Font.Color := clWhite;
+      pnlStatus.Color := $00808000;  // Dark Yellow (warning)
+    end;
   end
   else
   begin
-    lblDriveStatus.Caption := '● OFFLINE';
+    StatusText := '● OFFLINE';
     lblDriveStatus.Font.Color := clWhite;
     pnlStatus.Color := $002020B0;  // Dark Red
   end;
 
+  lblDriveStatus.Caption := StatusText;
   lblDriveStatus.Refresh;
   pnlStatus.Refresh;
 end;
@@ -228,12 +573,11 @@ begin
       Screen.Monitors[1].Width,
       Screen.Monitors[1].Height
     );
-    // WindowState := wsMaximized;
   end;
 
-  // Load Terminal Config
   LoadTerminalConfig;
   ValidateTerminalConfig;
+  FAppConfig := LoadAppConfig;
 
   FPendingQty := 0;
   FQtyMode := False;
@@ -243,7 +587,6 @@ begin
   FLoginHistoryID := 0;
   FDataDrivePath := 'F:\wpi\dat';
 
-  // Initialize user info
   FCurrentUser.ID := 0;
   FCurrentUser.CashierCode := '';
   FCurrentUser.Name := '';
@@ -261,15 +604,25 @@ begin
     SQLite3Connection1.Connected := True;
     CreateAllTables;
 
+    FSyncQueueManager := TSyncQueueManager.Create(SQLite3Connection1, SQLTransaction1, SQLQuery1);
+    FPostgreSQLManager := TPostgreSQLManager.Create(TERMINAL_ID);
+    FSyncWorker := TSyncWorker.Create(FPostgreSQLManager, FSyncQueueManager);
+
     DataSource1.DataSet := SQLQuery1;
     DBGrid1.DataSource := DataSource1;
 
+    CheckDriveStatus;
+
+    // ========== INITIALIZE POSTGRESQL DULU (SEBELUM LOGIN) ==========
+    InitializePostgreSQL;
+    // ========== END ==========
+
+    // Login (akan cek FPostgreSQLManager.IsConnected)
     DoLogin;
 
-    CheckDriveStatus;
     CheckAndOpenCashDrawer;
-
     LoadCartTemp;
+
   except
     on E: Exception do
       ShowMessage('Error inisialisasi database: ' + E.Message);
@@ -279,6 +632,18 @@ end;
 procedure TForm1.FormClose(Sender: TObject; var CloseAction: TCloseAction);
 begin
   CloseAction := caFree;
+
+  // Stop and free sync managers
+  if Assigned(FSyncWorker) then
+  begin
+    FSyncWorker.Stop;
+    FSyncWorker.Free;
+  end;
+  if Assigned(FPostgreSQLManager) then
+    FPostgreSQLManager.Free;
+  if Assigned(FSyncQueueManager) then
+    FSyncQueueManager.Free;
+
   DoLogout;
 end;
 
@@ -433,6 +798,27 @@ begin
     + ');';
   SQLQuery1.ExecSQL;
 
+  SQLQuery1.SQL.Text :=
+    'CREATE TABLE IF NOT EXISTS products (' +
+    ' product_code VARCHAR(13) PRIMARY KEY,' +
+    ' altcode VARCHAR(13),' +
+    ' product_name VARCHAR(200) NOT NULL,' +
+    ' price REAL NOT NULL,' +
+    ' price_a REAL DEFAULT 0,' +
+    ' qty_a REAL DEFAULT 0,' +
+    ' price_b REAL DEFAULT 0,' +
+    ' qty_b REAL DEFAULT 0,' +
+    ' boom INTEGER DEFAULT 0,' +
+    ' qtymeth INTEGER DEFAULT 0,' +
+    ' is_active INTEGER DEFAULT 1,' +
+    ' updated_at VARCHAR(20)' +
+    ');';
+  SQLQuery1.ExecSQL;
+
+  SQLQuery1.SQL.Text :=
+    'CREATE INDEX IF NOT EXISTS idx_products_altcode ON products(altcode)';
+  SQLQuery1.ExecSQL;
+
   CreateUserTables;
   CreateCashDrawerTable;
 
@@ -450,6 +836,7 @@ begin
     ' name VARCHAR(100) NOT NULL,' +
     ' level VARCHAR(10) NOT NULL,' +
     ' active INTEGER DEFAULT 1,' +
+    ' is_default INTEGER DEFAULT 0,' +
     ' created_at VARCHAR(20),' +
     ' updated_at VARCHAR(20)' +
     ');';
@@ -457,13 +844,8 @@ begin
 
   // Insert default users jika belum ada
   SQLQuery1.SQL.Text :=
-    'INSERT OR IGNORE INTO users (cashier_code, password, name, level, created_at) ' +
-    'VALUES (''000000'', ''000000'', ''Administrator'', ''admin'', datetime(''now''))';
-  SQLQuery1.ExecSQL;
-
-  SQLQuery1.SQL.Text :=
-    'INSERT OR IGNORE INTO users (cashier_code, password, name, level, created_at) ' +
-    'VALUES (''111111'', ''111111'', ''Kasir 1'', ''kasir'', datetime(''now''))';
+    'INSERT OR IGNORE INTO users (id, cashier_code, password, name, level, is_default, created_at) ' +
+    'VALUES (999, ''999999'', ''919191'', ''ADMIN SETUP'', ''admin'', 1, datetime(''now''))';
   SQLQuery1.ExecSQL;
 
   // Tabel login_history
@@ -481,6 +863,12 @@ begin
 end;
 
 procedure TForm1.DoLogin;
+var
+  IsAdminSetup: Boolean;
+  UserCount, ProductCount: Integer;
+  ProgressForm: TForm;
+  ProgressLabel: TLabel;
+  Success: Boolean;
 begin
   if FrmLogin = nil then
     FrmLogin := TFrmLogin.Create(Self);
@@ -494,11 +882,190 @@ begin
     FLoginHistoryID := FrmLogin.LoginHistoryID;
     UpdateUserInfoDisplay;
 
-    ShowMessage('Selamat datang, ' + FCurrentUser.Name + '!');
+    IsAdminSetup := (FCurrentUser.CashierCode = '999999');
+
+    if IsAdminSetup then
+    begin
+      // ========== ADMIN SETUP - SYNC USER & PRODUK ==========
+
+      // CEK KONEKSI POSTGRESQL
+      if not Assigned(FPostgreSQLManager) or not FPostgreSQLManager.IsConnected then
+      begin
+        ShowMessage('ERROR!' + sLineBreak + sLineBreak +
+                    'Tidak terhubung ke PostgreSQL.' + sLineBreak +
+                    'Aplikasi akan ditutup.');
+        Application.Terminate;
+        Exit;
+      end;
+
+      ShowMessage('LOGIN SEBAGAI ADMIN SETUP' + sLineBreak + sLineBreak +
+                  'User ini hanya untuk sinkronisasi data.' + sLineBreak +
+                  'Proses sinkronisasi akan dimulai...');
+
+      // BUAT PROGRESS FORM
+      UserCount := 0;
+      ProductCount := 0;
+      Success := True;
+
+      ProgressForm := TForm.Create(nil);
+      try
+        ProgressForm.BorderStyle := bsNone;
+        ProgressForm.Width := 500;
+        ProgressForm.Height := 180;
+        ProgressForm.Position := poScreenCenter;
+        ProgressForm.Color := clWhite;
+
+        ProgressLabel := TLabel.Create(ProgressForm);
+        ProgressLabel.Parent := ProgressForm;
+        ProgressLabel.Align := alClient;
+        ProgressLabel.Alignment := taCenter;
+        ProgressLabel.Layout := tlCenter;
+        ProgressLabel.Font.Size := 14;
+        ProgressLabel.Font.Color := clBlack;
+
+        ProgressForm.Show;
+        Application.ProcessMessages;
+
+        try
+          // ========== 1. SYNC USERS DARI POSTGRESQL ==========
+          ProgressLabel.Caption := 'SYNC USER DARI SERVER' + sLineBreak + sLineBreak +
+                                   'Mohon tunggu...';
+          ProgressLabel.Font.Color := clBlack;
+          Application.ProcessMessages;
+
+          try
+            SyncUsersFromPostgreSQL;
+
+            // Get user count
+            SQLQuery1.SQL.Text := 'SELECT COUNT(*) as cnt FROM users WHERE is_default = 0';
+            SQLQuery1.Open;
+            UserCount := SQLQuery1.FieldByName('cnt').AsInteger;
+            SQLQuery1.Close;
+
+            ProgressLabel.Caption := 'SYNC USER BERHASIL!' + sLineBreak + sLineBreak +
+                                     'Total: ' + IntToStr(UserCount) + ' user';
+            ProgressLabel.Font.Color := clGreen;
+            Application.ProcessMessages;
+            Sleep(1000);
+          except
+            on E: Exception do
+            begin
+              ProgressLabel.Caption := 'SYNC USER GAGAL!' + sLineBreak + sLineBreak +
+                                       E.Message;
+              ProgressLabel.Font.Color := clRed;
+              Application.ProcessMessages;
+              Sleep(2000);
+              Success := False;
+            end;
+          end;
+
+          // ========== 2. SYNC PRODUCTS DARI DBF ==========
+          ProgressLabel.Caption := 'SYNC MASTER PRODUK DARI DBF' + sLineBreak + sLineBreak +
+                                   'Mohon tunggu...';
+          ProgressLabel.Font.Color := clBlack;
+          Application.ProcessMessages;
+
+          try
+            ProductCount := ReadDBFProducts(FDataDrivePath + '\produk.dbf');
+
+            if ProductCount > 0 then
+            begin
+              ProgressLabel.Caption := 'SYNC PRODUK BERHASIL!' + sLineBreak + sLineBreak +
+                                       'Total: ' + IntToStr(ProductCount) + ' produk';
+              ProgressLabel.Font.Color := clGreen;
+              Application.ProcessMessages;
+              Sleep(1000);
+            end
+            else
+            begin
+              ProgressLabel.Caption := 'SYNC PRODUK GAGAL!' + sLineBreak + sLineBreak +
+                                       'Tidak ada data produk';
+              ProgressLabel.Font.Color := clRed;
+              Application.ProcessMessages;
+              Sleep(2000);
+              Success := False;
+            end;
+          except
+            on E: Exception do
+            begin
+              ProgressLabel.Caption := 'SYNC PRODUK GAGAL!' + sLineBreak + sLineBreak +
+                                       E.Message;
+              ProgressLabel.Font.Color := clRed;
+              Application.ProcessMessages;
+              Sleep(2000);
+              Success := False;
+            end;
+          end;
+
+          // ========== 3. SUMMARY ==========
+          if Success then
+          begin
+            ProgressLabel.Caption := 'SETUP SELESAI!' + sLineBreak + sLineBreak +
+                                     'User: ' + IntToStr(UserCount) + sLineBreak +
+                                     'Produk: ' + IntToStr(ProductCount);
+            ProgressLabel.Font.Color := clGreen;
+          end
+          else
+          begin
+            ProgressLabel.Caption := 'SETUP SELESAI DENGAN ERROR!' + sLineBreak + sLineBreak +
+                                     'Cek pesan error di atas';
+            ProgressLabel.Font.Color := clRed;
+          end;
+          Application.ProcessMessages;
+          Sleep(2000);
+
+        finally
+          ProgressForm.Close;
+        end;
+
+      finally
+        ProgressForm.Free;
+      end;
+
+      // SHOW FINAL SUMMARY
+      if Success then
+      begin
+        ShowMessage('SETUP SELESAI!' + sLineBreak + sLineBreak +
+                    'User tersinkron: ' + IntToStr(UserCount) + sLineBreak +
+                    'Produk tersinkron: ' + IntToStr(ProductCount) + sLineBreak + sLineBreak +
+                    'Aplikasi akan ditutup.' + sLineBreak +
+                    'Login kembali dengan user normal untuk transaksi.');
+      end
+      else
+      begin
+        ShowMessage('SETUP SELESAI DENGAN ERROR!' + sLineBreak + sLineBreak +
+                    'User tersinkron: ' + IntToStr(UserCount) + sLineBreak +
+                    'Produk tersinkron: ' + IntToStr(ProductCount) + sLineBreak + sLineBreak +
+                    'Periksa koneksi dan coba lagi.');
+      end;
+
+      Application.Terminate;
+      Halt;
+      // ========== END ADMIN SETUP ==========
+    end
+    else
+    begin
+      // ========== USER NORMAL - INFO MODE ==========
+      if Assigned(FPostgreSQLManager) and FPostgreSQLManager.IsConnected then
+      begin
+        // ONLINE MODE
+        ShowMessage('Selamat datang, ' + FCurrentUser.Name + '!' + sLineBreak + sLineBreak +
+                    'Mode: ONLINE + SYNC' + sLineBreak +
+                    'Data akan tersinkron ke server.');
+      end
+      else
+      begin
+        // OFFLINE MODE
+        ShowMessage('Selamat datang, ' + FCurrentUser.Name + '!' + sLineBreak + sLineBreak +
+                    'Mode: OFFLINE (LOCAL ONLY)' + sLineBreak +
+                    'Server tidak terhubung.' + sLineBreak +
+                    'Transaksi akan disimpan lokal dan disinkron saat online.');
+      end;
+      // ========== END INFO ==========
+    end;
   end
   else
   begin
-    // User tidak login, tutup aplikasi
     Application.Terminate;
   end;
 end;
@@ -859,6 +1426,8 @@ var
   Arr: TJSONArray;
   S: string;
   CodeLen: Integer;
+  TempQuery: TSQLQuery;
+  FoundInSQLite: Boolean;
 begin
   Result.Found := False;
   Result.Boom := False;
@@ -867,14 +1436,77 @@ begin
   Result.PriceA := 0;
   Result.QtyB := 0;
   Result.PriceB := 0;
+  Result.Code := '';
+  Result.Name := '';
+  Result.Price := 0;
 
   if Trim(ACode) = '' then Exit;
 
+  FoundInSQLite := False;
+
   try
+    // ========== PRIORITAS 1: CEK SQLITE LOKAL ==========
+    TempQuery := TSQLQuery.Create(nil);
+    try
+      TempQuery.Database := SQLite3Connection1;
+      TempQuery.Transaction := SQLTransaction1;
+
+      TempQuery.SQL.Text :=
+        'SELECT product_code, altcode, product_name, price, ' +
+        '       price_a, qty_a, price_b, qty_b, boom, qtymeth ' +
+        'FROM products ' +
+        'WHERE (product_code = :code OR altcode = :code) ' +
+        '  AND is_active = 1 ' +
+        'LIMIT 1';
+      TempQuery.ParamByName('code').AsString := UpperCase(ACode);
+
+      try
+        TempQuery.Open;
+
+        if not TempQuery.EOF then
+        begin
+          // Found in SQLite!
+          Result.Found := True;
+          Result.Code := TempQuery.FieldByName('product_code').AsString;
+          Result.Name := TempQuery.FieldByName('product_name').AsString;
+          Result.Price := TempQuery.FieldByName('price').AsFloat;
+          Result.Boom := (TempQuery.FieldByName('boom').AsInteger = 1);
+          Result.QtyMeth := (TempQuery.FieldByName('qtymeth').AsInteger = 1);
+          Result.QtyA := TempQuery.FieldByName('qty_a').AsFloat;
+          Result.PriceA := TempQuery.FieldByName('price_a').AsFloat;
+          Result.QtyB := TempQuery.FieldByName('qty_b').AsFloat;
+          Result.PriceB := TempQuery.FieldByName('price_b').AsFloat;
+
+          FoundInSQLite := True;  // ← SET FLAG, jangan FREE dan EXIT di sini
+        end;
+
+        if TempQuery.Active then
+          TempQuery.Close;
+
+      except
+        on E: Exception do
+        begin
+          // Error SQLite - lanjut ke DBF
+          if TempQuery.Active then
+            TempQuery.Close;
+        end;
+      end;
+
+    finally
+      TempQuery.Free;  // ← FREE di sini (1x aja)
+    end;
+    // ========== END SQLITE CHECK ==========
+
+    // Jika sudah ketemu di SQLite, return
+    if FoundInSQLite then
+      Exit;
+
+    // ========== PRIORITAS 2: CEK DBF (FALLBACK) ==========
     if not FDriveOnline then
     begin
-      ShowMessage('Sistem pencarian OFFLINE!' + sLineBreak +
-                  'Drive data tidak tersedia.');
+      ShowMessage('PRODUK TIDAK DITEMUKAN!' + sLineBreak + sLineBreak +
+                  'Produk tidak ada di database lokal.' + sLineBreak +
+                  'Drive data offline, tidak bisa cari di DBF.');
       Exit;
     end;
 
@@ -894,7 +1526,8 @@ begin
     JsonPath := BasePath + UpperCase(ACode) + '.json';
     ExecPath := BasePath + 'seekprod.exe';
 
-    if FileExists(ExecPath) then begin
+    if FileExists(ExecPath) then
+    begin
       Proc := TProcess.Create(nil);
       try
         Proc.Executable := ExecPath;
@@ -925,8 +1558,6 @@ begin
           Result.Code := Obj.Get('code', '');
           Result.Name := Obj.Get('desc', Obj.Get('name', ''));
           Result.Price := Obj.Get('price', 0.0);
-
-          // Data harga grosir
           Result.Boom := Obj.Get('boom', False);
           Result.QtyMeth := Obj.Get('qtymeth', False);
           Result.QtyA := Obj.Get('qty_a', 0.0);
@@ -937,14 +1568,13 @@ begin
 
         jtArray: begin
           Arr := TJSONArray(JSON);
-          if Arr.Count > 0 then begin
+          if Arr.Count > 0 then
+          begin
             Obj := Arr.Objects[0];
             Result.Found := True;
             Result.Code := Obj.Get('code', '');
             Result.Name := Obj.Get('desc', Obj.Get('name', ''));
             Result.Price := Obj.Get('price', 0.0);
-
-            // Harga grosir
             Result.Boom := Obj.Get('boom', False);
             Result.QtyMeth := Obj.Get('qtymeth', False);
             Result.QtyA := Obj.Get('qty_a', 0.0);
@@ -960,8 +1590,10 @@ begin
       if FileExists(JsonPath) then
         DeleteFile(JsonPath);
     end;
+
   except
-    on E: Exception do begin
+    on E: Exception do
+    begin
       Result.Found := False;
       ShowMessage('Error searching product: ' + E.Message);
     end;
@@ -972,14 +1604,24 @@ function TForm1.GetPriceByQty(const Info: TProductInfo; AQty: Double): Double;
 begin
   Result := Info.Price; // Default harga normal
 
+  // Validasi input
+  if AQty <= 0 then
+    Exit;
+
+  if Info.Price < 0 then
+  begin
+    Result := 0;
+    Exit;
+  end;
+
   // Cek apakah produk memiliki harga grosir
   if Info.Boom and Info.QtyMeth then
   begin
     // Cek qty_b
-    if (Info.QtyB > 0) and (AQty > Info.QtyB) then
+    if (Info.QtyB > 0) and (AQty > Info.QtyB) and (Info.PriceB > 0) then
       Result := Info.PriceB
     // Cek qty_a
-    else if (Info.QtyA > 0) and (AQty > Info.QtyA) then
+    else if (Info.QtyA > 0) and (AQty > Info.QtyA) and (Info.PriceA > 0) then
       Result := Info.PriceA;
   end;
 end;
@@ -996,18 +1638,49 @@ procedure TForm1.AddToCartWithQty(const Info: TProductInfo; AQty: Integer);
 var
   OldQty, NewQty, Total, ActualPrice: Double;
 begin
+  // Validasi input
+  if not Info.Found then
+  begin
+    ShowMessage('Produk tidak valid!');
+    Exit;
+  end;
+
+  if Trim(Info.Code) = '' then
+  begin
+    ShowMessage('Kode produk kosong!');
+    Exit;
+  end;
+
+  if AQty <= 0 then
+  begin
+    ShowMessage('Quantity harus lebih dari 0!');
+    Exit;
+  end;
+
+  if Info.Price < 0 then
+  begin
+    ShowMessage('Harga produk tidak valid!');
+    Exit;
+  end;
+
   try
     SQLQuery1.Close;
     SQLQuery1.SQL.Text := 'SELECT id, qty FROM cart_temp WHERE product_code = :c';
     SQLQuery1.ParamByName('c').AsString := Info.Code;
     SQLQuery1.Open;
 
-    if not SQLQuery1.EOF then begin
+    if not SQLQuery1.EOF then
+    begin
+      // Update existing item
       OldQty := SQLQuery1.FieldByName('qty').AsFloat;
       NewQty := OldQty + AQty;
 
       // Hitung harga berdasarkan qty total
       ActualPrice := GetPriceByQty(Info, NewQty);
+
+      if ActualPrice < 0 then
+        ActualPrice := Info.Price;
+
       Total := NewQty * ActualPrice;
 
       SQLQuery1.Close;
@@ -1025,11 +1698,17 @@ begin
       SQLQuery1.ParamByName('q').AsFloat := NewQty;
       SQLQuery1.ParamByName('t').AsFloat := Total;
       SQLQuery1.ExecSQL;
-    end else begin
-      // Hitung harga berdasarkan qty
+    end
+    else
+    begin
+      // Add new item
+      SQLQuery1.Close;
+
       ActualPrice := GetPriceByQty(Info, AQty);
 
-      SQLQuery1.Close;
+      if ActualPrice < 0 then
+        ActualPrice := Info.Price;
+
       SQLQuery1.SQL.Text :=
         'INSERT INTO cart_temp (product_code, product_name, price, qty, discount_value, discount_type, total_price) '
         + 'VALUES (:c, :n, :p, :q, 0, '''', :t)';
@@ -1050,7 +1729,10 @@ begin
     end;
   except
     on E: Exception do
+    begin
       ShowMessage('Error adding to cart: ' + E.Message);
+      LoadCartTemp; // Reload cart untuk safety
+    end;
   end;
 end;
 
@@ -1184,6 +1866,10 @@ var
   PayAmount, SubTotal, Change: Double;
   TID: Integer;
   TrNo, TrDate: string;
+  TrxData: TJSONObject;
+  ItemsArray: TJSONArray;
+  ItemQuery: TSQLQuery;
+  ItemObj: TJSONObject;
 begin
   try
     if SQLQuery1.Active then
@@ -1261,6 +1947,65 @@ begin
 
       SQLTransaction1.Commit;
 
+      // ========== SYNC TO POSTGRESQL ==========
+      try
+        if Assigned(FPostgreSQLManager) and FPostgreSQLManager.IsConnected then
+        begin
+          TrxData := TJSONObject.Create;
+          ItemsArray := TJSONArray.Create;
+          ItemQuery := TSQLQuery.Create(nil);
+          try
+            ItemQuery.Database := SQLite3Connection1;
+            ItemQuery.Transaction := SQLTransaction1;
+
+            // Get items dari transaction yang baru disimpan
+            ItemQuery.SQL.Text :=
+              'SELECT product_code, product_name, price, qty, discount_value, discount_type, total_price ' +
+              'FROM transaction_items WHERE transaction_id = :tid';
+            ItemQuery.ParamByName('tid').AsInteger := TID;
+            ItemQuery.Open;
+
+            while not ItemQuery.EOF do
+            begin
+              ItemObj := TJSONObject.Create;
+              ItemObj.Add('product_code', ItemQuery.FieldByName('product_code').AsString);
+              ItemObj.Add('product_name', ItemQuery.FieldByName('product_name').AsString);
+              ItemObj.Add('qty', ItemQuery.FieldByName('qty').AsInteger);
+              ItemObj.Add('price', ItemQuery.FieldByName('price').AsFloat);
+              ItemObj.Add('discount_value', ItemQuery.FieldByName('discount_value').AsFloat);
+              ItemObj.Add('discount_type', ItemQuery.FieldByName('discount_type').AsString);
+              ItemObj.Add('total_price', ItemQuery.FieldByName('total_price').AsFloat);
+
+              ItemsArray.Add(ItemObj);
+              ItemQuery.Next;
+            end;
+
+            ItemQuery.Close;
+
+            // Build transaction data
+            TrxData.Add('user_id', FCurrentUser.ID);
+            TrxData.Add('total_amount', SubTotal);
+            TrxData.Add('payment_type', PayType);
+            TrxData.Add('payment_bank', Provider);
+            TrxData.Add('payment_last4', Last4);
+            TrxData.Add('payment_amount', PayAmount);
+            TrxData.Add('change_amount', Change);
+            TrxData.Add('is_return', False);
+            TrxData.Add('items', ItemsArray);
+
+            // Try sync immediately
+            TrySyncTransaction(TrNo, TrxData);
+
+          finally
+            ItemQuery.Free;
+            TrxData.Free;
+          end;
+        end;
+      except
+        // Silent - sync failure tidak boleh block transaksi
+      end;
+      // ========== END SYNC ==========
+
       // Update cash drawer jika pembayaran cash
       if PayType = 'cash' then
         UpdateCashDrawerSales(SubTotal, False);
@@ -1300,7 +2045,12 @@ begin
   if FrmSearchName = nil then
     FrmSearchName := TFrmSearchName.Create(Self);
 
-  if FrmSearchName.ShowModal = mrOK then begin
+  // Pass SQLite connection
+  FrmSearchName.Connection := SQLite3Connection1;
+  FrmSearchName.Transaction := SQLTransaction1;
+
+  if FrmSearchName.ShowModal = mrOK then
+  begin
     if FrmSearchName.SelectedProduct.Found then
       AddToCart(FrmSearchName.SelectedProduct);
   end;
@@ -1372,6 +2122,14 @@ end;
 { --------------------------------------------------------------- }
 procedure TForm1.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
+  // Block semua shortcut untuk Admin Setup
+  if FCurrentUser.CashierCode = '999999' then
+  begin
+    ShowMessage('ADMIN SETUP tidak bisa melakukan transaksi!' + sLineBreak + sLineBreak +
+                'Silakan logout dan login dengan user normal.');
+    Exit;
+  end;
+
   case Key of
     KEY_CLEAR_CART: begin
       if MessageDlg('Hapus semua item keranjang?', mtConfirmation, [mbYes, mbNo], 0) = mrYes then
@@ -1410,6 +2168,11 @@ begin
 
     KEY_RETURN: begin
       HandleReturn;
+      Exit;
+    end;
+
+    KEY_EOD: begin
+      HandleEndOfDay;
       Exit;
     end;
 
@@ -1540,6 +2303,10 @@ var
   ReturnTotal, ItemTotal, DiscountProportion, CurrentDiscountValue: Double;
   HasValidItems: Boolean;
   ItemCount: Integer;
+  TrxData: TJSONObject;
+  ItemsArray: TJSONArray;
+  ItemObj: TJSONObject;
+  ItemQuery: TSQLQuery;
 begin
   try
     ReturnTotal := 0;
@@ -1561,11 +2328,9 @@ begin
     // Hitung total retur dengan validasi ketat
     for i := 0 to High(Items) do begin
       try
-        // Skip item kosong
         if Trim(Items[i].ProductCode) = '' then
           Continue;
 
-        // Validasi NaN/Infinite di semua field
         if IsNaN(Items[i].ReturnQty) or IsInfinite(Items[i].ReturnQty) then
           Continue;
         if IsNaN(Items[i].OriginalQty) or IsInfinite(Items[i].OriginalQty) then
@@ -1573,33 +2338,26 @@ begin
         if IsNaN(Items[i].Price) or IsInfinite(Items[i].Price) then
           Continue;
 
-        // Copy discount value ke variable lokal
         CurrentDiscountValue := Items[i].DiscountValue;
         if IsNaN(CurrentDiscountValue) or IsInfinite(CurrentDiscountValue) then
           CurrentDiscountValue := 0;
 
-        // Skip item dengan qty 0 atau negatif
         if Items[i].ReturnQty <= 0 then
           Continue;
 
-        // Skip item dengan OriginalQty invalid
         if Items[i].OriginalQty <= 0 then
           Continue;
 
-        // Skip item dengan Price invalid
         if Items[i].Price < 0 then
           Continue;
 
-        // Hitung proporsi diskon
         DiscountProportion := 0;
         if CurrentDiscountValue > 0 then begin
           DiscountProportion := CurrentDiscountValue * (Items[i].ReturnQty / Items[i].OriginalQty);
         end;
 
-        // Hitung item total
         ItemTotal := (Items[i].Price * Items[i].ReturnQty) - DiscountProportion;
 
-        // Validasi ItemTotal
         if IsNaN(ItemTotal) or IsInfinite(ItemTotal) then
           Continue;
 
@@ -1611,20 +2369,17 @@ begin
 
       except
         on E: Exception do begin
-          // Skip item yang error
           Continue;
         end;
       end;
     end;
 
-    // Validasi ada item valid
     if not HasValidItems then begin
       ShowMessage('Tidak ada item valid untuk diretur!');
       LoadCartTemp;
       Exit;
     end;
 
-    // Validasi total retur
     if IsNaN(ReturnTotal) or IsInfinite(ReturnTotal) then begin
       ShowMessage('Total retur tidak valid (NaN/Infinite)!');
       LoadCartTemp;
@@ -1674,11 +2429,9 @@ begin
       // Insert items dengan qty negatif - HANYA YANG VALID
       for i := 0 to High(Items) do begin
         try
-          // Skip item kosong
           if Trim(Items[i].ProductCode) = '' then
             Continue;
 
-          // Validasi NaN/Infinite
           if IsNaN(Items[i].ReturnQty) or IsInfinite(Items[i].ReturnQty) then
             Continue;
           if IsNaN(Items[i].OriginalQty) or IsInfinite(Items[i].OriginalQty) then
@@ -1686,24 +2439,19 @@ begin
           if IsNaN(Items[i].Price) or IsInfinite(Items[i].Price) then
             Continue;
 
-          // Copy discount value
           CurrentDiscountValue := Items[i].DiscountValue;
           if IsNaN(CurrentDiscountValue) or IsInfinite(CurrentDiscountValue) then
             CurrentDiscountValue := 0;
 
-          // Skip item dengan qty 0 atau negatif
           if Items[i].ReturnQty <= 0 then
             Continue;
 
-          // Skip item dengan OriginalQty invalid
           if Items[i].OriginalQty <= 0 then
             Continue;
 
-          // Skip item dengan Price invalid
           if Items[i].Price < 0 then
             Continue;
 
-          // Hitung proporsi diskon
           DiscountProportion := 0;
           if CurrentDiscountValue > 0 then begin
             DiscountProportion := CurrentDiscountValue * (Items[i].ReturnQty / Items[i].OriginalQty);
@@ -1711,7 +2459,6 @@ begin
 
           ItemTotal := (Items[i].Price * Items[i].ReturnQty) - DiscountProportion;
 
-          // Validasi ItemTotal
           if IsNaN(ItemTotal) or IsInfinite(ItemTotal) then
             Continue;
 
@@ -1741,6 +2488,66 @@ begin
 
       SQLTransaction1.Commit;
 
+      // ========== SYNC TO POSTGRESQL ==========
+      try
+        if Assigned(FPostgreSQLManager) and FPostgreSQLManager.IsConnected then
+        begin
+          TrxData := TJSONObject.Create;
+          ItemsArray := TJSONArray.Create;
+          ItemQuery := TSQLQuery.Create(nil);
+          try
+            ItemQuery.Database := SQLite3Connection1;
+            ItemQuery.Transaction := SQLTransaction1;
+
+            // Get items dari return transaction yang baru disimpan
+            ItemQuery.SQL.Text :=
+              'SELECT product_code, product_name, price, qty, discount_value, discount_type, total_price ' +
+              'FROM transaction_items WHERE transaction_id = :tid';
+            ItemQuery.ParamByName('tid').AsInteger := ReturnTID;
+            ItemQuery.Open;
+
+            while not ItemQuery.EOF do
+            begin
+              ItemObj := TJSONObject.Create;
+              ItemObj.Add('product_code', ItemQuery.FieldByName('product_code').AsString);
+              ItemObj.Add('product_name', ItemQuery.FieldByName('product_name').AsString);
+              ItemObj.Add('qty', ItemQuery.FieldByName('qty').AsInteger);
+              ItemObj.Add('price', ItemQuery.FieldByName('price').AsFloat);
+              ItemObj.Add('discount_value', ItemQuery.FieldByName('discount_value').AsFloat);
+              ItemObj.Add('discount_type', ItemQuery.FieldByName('discount_type').AsString);
+              ItemObj.Add('total_price', ItemQuery.FieldByName('total_price').AsFloat);
+
+              ItemsArray.Add(ItemObj);
+              ItemQuery.Next;
+            end;
+
+            ItemQuery.Close;
+
+            // Build return transaction data
+            TrxData.Add('user_id', FCurrentUser.ID);
+            TrxData.Add('total_amount', -ReturnTotal);  // Negatif untuk return
+            TrxData.Add('payment_type', OrigTrx.PaymentType);
+            TrxData.Add('payment_bank', OrigTrx.PaymentProvider);
+            TrxData.Add('payment_last4', OrigTrx.CardLast4);
+            TrxData.Add('payment_amount', -ReturnTotal);
+            TrxData.Add('change_amount', 0.0);
+            TrxData.Add('is_return', True);  // Flag return
+            TrxData.Add('original_trx_id', OrigTrx.TransactionNo);  // Reference ke transaksi asli
+            TrxData.Add('items', ItemsArray);
+
+            // Try sync immediately
+            TrySyncTransaction(ReturnNo, TrxData);
+
+          finally
+            ItemQuery.Free;
+            TrxData.Free;
+          end;
+        end;
+      except
+        // Silent - sync failure tidak boleh block retur
+      end;
+      // ========== END SYNC ==========
+
       // Update cash drawer jika retur dari transaksi cash
       if OrigTrx.PaymentType = 'cash' then
         UpdateCashDrawerSales(ReturnTotal, True);
@@ -1765,6 +2572,365 @@ begin
       LoadCartTemp;
       ShowMessage('Error: ' + E.Message);
     end;
+  end;
+end;
+
+{ --------------------------------------------------------------- }
+{ END OF DAY }
+{ --------------------------------------------------------------- }
+procedure TForm1.HandleEndOfDay;
+var
+  TrxCount: Integer;
+  TempQuery: TSQLQuery;
+  DrawerStatus: string;
+begin
+  TrxCount := 0;
+  TempQuery := TSQLQuery.Create(nil);
+  try
+    TempQuery.Database := SQLite3Connection1;
+    TempQuery.Transaction := SQLTransaction1;
+
+    // 1. CEK: Apakah cash drawer sudah closed hari ini?
+    TempQuery.SQL.Text :=
+      'SELECT status FROM cash_drawer ' +
+      'WHERE DATE(date) = DATE(''now'') ' +
+      'AND terminal_id = :term';
+    TempQuery.ParamByName('term').AsString := TERMINAL_ID;
+
+    try
+      TempQuery.Open;
+      if not TempQuery.EOF then
+      begin
+        DrawerStatus := TempQuery.FieldByName('status').AsString;
+        if DrawerStatus = 'closed' then
+        begin
+          ShowMessage('END OF DAY SUDAH DILAKUKAN!' + sLineBreak + sLineBreak +
+                      'EOD hari ini sudah selesai.' + sLineBreak +
+                      'Tidak bisa melakukan EOD lagi di hari yang sama.');
+          TempQuery.Close;
+          TempQuery.Free;
+          Exit;
+        end;
+      end;
+      TempQuery.Close;
+    except
+      on E: Exception do
+      begin
+        ShowMessage('Error cek cash drawer: ' + E.Message);
+        TempQuery.Free;
+        Exit;
+      end;
+    end;
+
+    // 2. CEK: Apakah ada transaksi hari ini?
+    TempQuery.SQL.Text :=
+      'SELECT COUNT(*) as cnt FROM transactions ' +
+      'WHERE DATE(transaction_date) = DATE(''now'') ' +
+      'AND deleted_at IS NULL ' +
+      'AND payment_status = ''sale''';
+
+    try
+      TempQuery.Open;
+      TrxCount := TempQuery.FieldByName('cnt').AsInteger;
+      TempQuery.Close;
+    except
+      on E: Exception do
+      begin
+        ShowMessage('Error cek transaksi: ' + E.Message);
+        TempQuery.Free;
+        Exit;
+      end;
+    end;
+
+  finally
+    TempQuery.Free;
+  end;
+
+  if TrxCount = 0 then
+  begin
+    ShowMessage('TIDAK ADA TRANSAKSI!' + sLineBreak + sLineBreak +
+                'End of Day hanya bisa dilakukan jika ada transaksi hari ini.');
+    Exit;
+  end;
+
+  // 3. Konfirmasi EOD
+  if MessageDlg('END OF DAY' + sLineBreak + sLineBreak +
+                'Total transaksi hari ini: ' + IntToStr(TrxCount) + sLineBreak + sLineBreak +
+                'Proses End of Day akan:' + sLineBreak +
+                '1. Tutup cash drawer hari ini' + sLineBreak +
+                '2. Sinkronisasi semua data ke server' + sLineBreak +
+                '3. Tutup aplikasi' + sLineBreak + sLineBreak +
+                'Lanjutkan?',
+                mtConfirmation, [mbYes, mbNo], 0) = mrYes then
+    ProcessEndOfDay;
+end;
+
+procedure TForm1.SyncCashDrawerEOD;
+var
+  CashDrawerData: TJSONObject;
+begin
+  if not Assigned(FPostgreSQLManager) or not FPostgreSQLManager.IsConnected then
+    Exit;
+
+  try
+    // Get cash drawer data
+    SQLQuery1.SQL.Text :=
+      'SELECT * FROM cash_drawer WHERE id = :id';
+    SQLQuery1.ParamByName('id').AsInteger := FCurrentDrawerID;
+    SQLQuery1.Open;
+
+    if not SQLQuery1.EOF then
+    begin
+      CashDrawerData := TJSONObject.Create;
+      try
+        CashDrawerData.Add('user_id', FCurrentUser.ID);
+        CashDrawerData.Add('amount', SQLQuery1.FieldByName('opening_cash').AsFloat);
+        CashDrawerData.Add('balance_before', 0.0);
+        CashDrawerData.Add('balance_after', SQLQuery1.FieldByName('expected_cash').AsFloat);
+        CashDrawerData.Add('trx_id', '');
+        CashDrawerData.Add('notes',
+          'Opening: ' + FormatFloat('#,##0', SQLQuery1.FieldByName('opening_cash').AsFloat) + ' | ' +
+          'Sales: ' + FormatFloat('#,##0', SQLQuery1.FieldByName('cash_sales').AsFloat) + ' | ' +
+          'Returns: ' + FormatFloat('#,##0', SQLQuery1.FieldByName('cash_returns').AsFloat) + ' | ' +
+          'Expected: ' + FormatFloat('#,##0', SQLQuery1.FieldByName('expected_cash').AsFloat) + ' | ' +
+          'Actual: ' + FormatFloat('#,##0', SQLQuery1.FieldByName('closing_cash').AsFloat) + ' | ' +
+          'Diff: ' + FormatFloat('#,##0', SQLQuery1.FieldByName('difference').AsFloat)
+        );
+
+        // Sync opening drawer
+        FPostgreSQLManager.SyncCashDrawer('open', CashDrawerData);
+
+        // Update for closing
+        CashDrawerData.Delete('amount');
+        CashDrawerData.Add('amount', SQLQuery1.FieldByName('closing_cash').AsFloat);
+        CashDrawerData.Delete('balance_after');
+        CashDrawerData.Add('balance_after', SQLQuery1.FieldByName('closing_cash').AsFloat);
+
+        // Sync closing drawer
+        FPostgreSQLManager.SyncCashDrawer('close', CashDrawerData);
+
+      finally
+        CashDrawerData.Free;
+      end;
+    end;
+
+    SQLQuery1.Close;
+  except
+    on E: Exception do
+      ShowMessage('Warning: Cash drawer sync failed - ' + E.Message);
+  end;
+end;
+
+procedure TForm1.ProcessEndOfDay;
+var
+  TodayStr: string;
+  ExpectedCash, ActualCash, Difference: Double;
+  ClosingTime: string;
+  Notes: string;
+  ActualCashStr: string;
+  SyncedCount, UserCount, ProductCount: Integer;
+  ProgressForm: TForm;
+  ProgressLabel: TLabel;
+begin
+  TodayStr := FormatDateTime('yyyy-mm-dd', Now);
+  ClosingTime := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
+
+  try
+    // 1. CEK APAKAH CASH DRAWER MASIH OPEN
+    if not IsCashDrawerOpen then
+    begin
+      ShowMessage('Cash drawer sudah ditutup atau belum dibuka hari ini!');
+      Exit;
+    end;
+
+    // 2. INPUT ACTUAL CASH
+    ActualCashStr := '';
+    if not InputQuery('END OF DAY - Hitung Uang',
+                      'Masukkan jumlah uang aktual di laci:',
+                      ActualCashStr) then
+      Exit;
+
+    ActualCash := StrToFloatDef(ActualCashStr, 0);
+
+    if ActualCash < 0 then
+    begin
+      ShowMessage('Jumlah uang tidak valid!');
+      Exit;
+    end;
+
+    // 3. GET EXPECTED CASH
+    SQLQuery1.SQL.Text :=
+      'SELECT expected_cash FROM cash_drawer WHERE id = :id';
+    SQLQuery1.ParamByName('id').AsInteger := FCurrentDrawerID;
+    SQLQuery1.Open;
+    ExpectedCash := SQLQuery1.FieldByName('expected_cash').AsFloat;
+    SQLQuery1.Close;
+
+    // 4. HITUNG SELISIH
+    Difference := ActualCash - ExpectedCash;
+
+    // 5. INPUT NOTES (OPSIONAL)
+    Notes := '';
+    if Difference <> 0 then
+    begin
+      if not InputQuery('END OF DAY - Catatan',
+                        'Catatan selisih (opsional):',
+                        Notes) then
+        Notes := '';
+    end;
+
+    // 6. UPDATE CASH DRAWER
+    SQLQuery1.SQL.Text :=
+      'UPDATE cash_drawer SET ' +
+      'closing_cash = :closing, ' +
+      'closing_time = :time, ' +
+      'difference = :diff, ' +
+      'notes = :notes, ' +
+      'status = ''closed'' ' +
+      'WHERE id = :id';
+    SQLQuery1.ParamByName('closing').AsFloat := ActualCash;
+    SQLQuery1.ParamByName('time').AsString := ClosingTime;
+    SQLQuery1.ParamByName('diff').AsFloat := Difference;
+    SQLQuery1.ParamByName('notes').AsString := Notes;
+    SQLQuery1.ParamByName('id').AsInteger := FCurrentDrawerID;
+    SQLQuery1.ExecSQL;
+
+    if SQLTransaction1.Active then
+      SQLTransaction1.Commit;
+
+    // 7. TAMPILKAN SUMMARY
+    ShowMessage('CLOSING CASH DRAWER' + sLineBreak + sLineBreak +
+                'Expected: Rp ' + FormatFloat('#,##0', ExpectedCash) + sLineBreak +
+                'Actual: Rp ' + FormatFloat('#,##0', ActualCash) + sLineBreak +
+                'Selisih: Rp ' + FormatFloat('#,##0', Difference) + sLineBreak + sLineBreak +
+                'Status: ' + IfThen(Difference = 0, 'PAS', IfThen(Difference > 0, 'LEBIH', 'KURANG')));
+
+    // 8. SYNC SEMUA DATA
+    ProgressForm := TForm.Create(nil);
+    try
+      ProgressForm.BorderStyle := bsNone;
+      ProgressForm.Width := 400;
+      ProgressForm.Height := 150;
+      ProgressForm.Position := poScreenCenter;
+      ProgressForm.Color := clWhite;
+
+      ProgressLabel := TLabel.Create(ProgressForm);
+      ProgressLabel.Parent := ProgressForm;
+      ProgressLabel.Align := alClient;
+      ProgressLabel.Alignment := taCenter;
+      ProgressLabel.Layout := tlCenter;
+      ProgressLabel.Font.Size := 14;
+
+      ProgressForm.Show;
+      Application.ProcessMessages;
+
+      try
+        // A. Sync Master Produk dari DBF
+        ProgressLabel.Caption := 'Sync Master Produk dari DBF...' + sLineBreak +
+                                 'Mohon tunggu...';
+        Application.ProcessMessages;
+
+        ProductCount := ReadDBFProducts(FDataDrivePath + '\produk.dbf');
+
+        // B. Sync User dari PostgreSQL (jika online)
+        if Assigned(FPostgreSQLManager) and FPostgreSQLManager.IsConnected then
+        begin
+          ProgressLabel.Caption := 'Sync User dari Server...' + sLineBreak +
+                                   'Mohon tunggu...';
+          Application.ProcessMessages;
+
+          SyncUsersFromPostgreSQL;
+
+          // Get user count
+          SQLQuery1.SQL.Text := 'SELECT COUNT(*) as cnt FROM users WHERE is_default = 0';
+          SQLQuery1.Open;
+          UserCount := SQLQuery1.FieldByName('cnt').AsInteger;
+          SQLQuery1.Close;
+
+          // C. Sync Cash Drawer
+          ProgressLabel.Caption := 'Sync Cash Drawer...';
+          Application.ProcessMessages;
+          SyncCashDrawerEOD;
+
+          // D. Sync All Pending Transactions
+          ProgressLabel.Caption := 'Sync Transaksi Pending...' + sLineBreak +
+                                   'Mohon tunggu...';
+          Application.ProcessMessages;
+          SyncedCount := SyncAllPendingData;
+
+          ProgressLabel.Caption := 'SINKRONISASI SELESAI!' + sLineBreak + sLineBreak +
+                                   'User: ' + IntToStr(UserCount) + ' | ' +
+                                   'Produk: ' + IntToStr(ProductCount) + ' | ' +
+                                   'Transaksi: ' + IntToStr(SyncedCount);
+          Application.ProcessMessages;
+          Sleep(2000);
+        end
+        else
+        begin
+          ProgressLabel.Caption := 'SYNC SELESAI (OFFLINE MODE)' + sLineBreak + sLineBreak +
+                                   'Produk: ' + IntToStr(ProductCount) + sLineBreak +
+                                   'Transaksi akan disinkron saat online';
+          Application.ProcessMessages;
+          Sleep(2000);
+        end;
+
+      finally
+        ProgressForm.Close;
+      end;
+
+    finally
+      ProgressForm.Free;
+    end;
+
+    if Assigned(FPostgreSQLManager) and FPostgreSQLManager.IsConnected then
+    begin
+      ShowMessage('SINKRONISASI SELESAI!' + sLineBreak + sLineBreak +
+                  'User: ' + IntToStr(UserCount) + sLineBreak +
+                  'Produk: ' + IntToStr(ProductCount) + sLineBreak +
+                  'Transaksi: ' + IntToStr(SyncedCount));
+    end
+    else
+    begin
+      ShowMessage('EOD SELESAI (OFFLINE)' + sLineBreak + sLineBreak +
+                  'Produk tersinkron: ' + IntToStr(ProductCount) + sLineBreak +
+                  'Data transaksi akan disinkron saat online.');
+    end;
+
+    // 9. TUTUP APLIKASI
+    ShowMessage('END OF DAY SELESAI!' + sLineBreak + sLineBreak +
+                'Aplikasi akan ditutup.' + sLineBreak +
+                'Terima kasih!');
+
+    Application.Terminate;
+
+  except
+    on E: Exception do
+    begin
+      if SQLTransaction1.Active then
+        SQLTransaction1.Rollback;
+      ShowMessage('ERROR END OF DAY: ' + E.Message);
+    end;
+  end;
+end;
+
+function TForm1.SyncAllPendingData: Integer;
+var
+  SyncedCount: Integer;
+begin
+  Result := 0;
+
+  try
+    // Sync pending queue
+    if Assigned(FSyncWorker) then
+    begin
+      SyncedCount := FSyncWorker.ProcessPendingQueue;
+      Result := SyncedCount;
+    end;
+  except
+    on E: Exception do
+      ShowMessage('WARNING: Beberapa data gagal disinkron.' + sLineBreak +
+                  'Data akan disinkron otomatis nanti.' + sLineBreak + sLineBreak +
+                  'Error: ' + E.Message);
   end;
 end;
 
